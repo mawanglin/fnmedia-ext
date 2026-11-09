@@ -14,7 +14,7 @@
 |---|---|
 | fnOS | **1.2.0 及以上**（FPK manifest 最低要求） |
 | 官方影视应用 | **trim.media `0.9.8-1`**（已实测） |
-| CPU 架构 | `all`（纯 Python，安装时创建独立 venv） |
+| CPU 架构 | x86 与 arm 各一个安装包（原生版，内置 Python 与依赖） |
 | 安装方式 | fnOS 应用中心手动安装 FPK，可安装在 `/vol1`、`/vol2` 等数据卷 |
 | 依赖 | 官方「影视 (trim.media)」必须保持安装并启用 |
 | 网络 | 资源站访问使用直连（`trust_env=False`），不读取代理环境变量 |
@@ -23,7 +23,7 @@
 
 ## 下载安装
 
-1. 打开 [Releases](https://github.com/yujian0815/fnmedia-ext/releases)，下载最新的 `fnmedia-ext-<version>.fpk`。
+1. 打开 [Releases](https://github.com/mawanglin/fnmedia-ext/releases)，按 NAS 的 CPU 下载最新的 `fnmedia-ext-<version>-x86.fpk` 或 `-arm.fpk`（原生版：Python 与全部依赖随包内置，安装不联网、不调用 apt/pip、不改动系统）。
 2. 在 fnOS **应用中心 → 手动安装 FPK** 中选择该文件。
 3. 选择应用安装所在存储卷，保持依赖应用 **影视 (trim.media)** 为运行状态。
 4. 安装完成后启用「飞牛影视在线扩展」，桌面/应用内会出现 **影视在线扩展管理**。

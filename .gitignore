@@ -59,3 +59,6 @@ dist/
 
 # 网盘功能内联第三方库(随pan私有)
 /proxy/_vendor/
+
+# 内置运行时由打包时生成，不入库
+/runtime/

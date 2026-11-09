@@ -1,0 +1,117 @@
+name: Release (native-only fork)
+
+# 本 fork（native-only 分支）的发布流程：
+#   - 只发 GitHub Release：x86、arm 各一个 fpk，内置 Python / 依赖 / ffprobe，安装不联网、不动系统；
+#   - tag 形如 v<上游基线>-n<自有小版本>，如 v1.0.0-n1，由 VERSION(1.0.0-1) + RELEASE_CHANNEL(fork) 推导；
+#   - 不要求 tag 合入 main：本分支永不合并 main（保持 main 可持续同步上游）；
+#   - 不回填 moo.json（上游的 moo 索引指向上游发布）。
+on:
+  push:
+    tags: ["v*-n*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要（补）发布的 tag，如 v1.0.0-n1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Verify tag matches VERSION
+        id: release-kind
+        run: python3 scripts/release_version.py --tag "$TAG" --github-output "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 上游公开树的全量测试有 47 项依赖已剥离的私有模块（如 app.guard_native_enabled），
+      # 在上游本身就失败，不能拿来卡发布；这里只卡本 fork 的打包约束并做语法检查。
+      - name: Run packaging tests
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest tests.test_native_packaging -v
+          python -m compileall -q proxy scripts
+        env:
+          PYTHONUTF8: "1"
+
+      - name: Download fnpack
+        run: |
+          curl -fsSL -o fnpack "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION}-linux-amd64"
+          chmod +x fnpack && sudo mv fnpack /usr/local/bin/fnpack
+        env:
+          FNPACK_VERSION: "1.2.3"
+
+      - name: Build fpk packages (x86 + arm)
+        run: |
+          ./packaging/fpk/build.sh
+          ls -la dist/
+
+      - name: Verify the fpks are self-contained
+        run: |
+          ver="$(python3 scripts/release_version.py --format version)"
+          for arch in x86 arm; do
+            fpk_file="dist/fnmedia-ext-${ver}-${arch}.fpk"
+            test -s "$fpk_file" && test -s "${fpk_file}.sha256"
+            work="$(mktemp -d)"
+            tar -xf "$fpk_file" -C "$work"
+            grep -qx "platform              = ${arch}" "$work/manifest"
+            mkdir -p "$work/app" && tar -xzf "$work/app.tgz" -C "$work/app"
+            test -f "$work/app/repo/runtime/BUNDLED"
+            test -x "$work/app/repo/runtime/python/bin/python3"
+            test -x "$work/app/repo/runtime/ffmpeg/ffprobe"
+            test -d "$work/app/repo/runtime/site/fastapi"
+            test "$(cat "$work/app/repo/VERSION")" = "$ver"
+            want="x86-64"; [ "$arch" = arm ] && want="aarch64"
+            for elf in python/bin/python3.13 ffmpeg/ffprobe; do
+              file -b "$work/app/repo/runtime/$elf" | grep -qi "$want" || { echo "$elf 不是 $want" >&2; exit 1; }
+            done
+            if [ -n "$(find "$work/app" -type l -lname '/*')" ]; then
+              echo "${arch} fpk 内有绝对路径符号链接（飞牛会解压失败）" >&2; exit 1
+            fi
+            rm -rf "$work"
+          done
+
+      - name: Extract changelog for this version
+        run: |
+          version="${{ steps.release-kind.outputs.display_version }}"
+          awk -v ver="$version" '
+            index($0, "## [" ver "]") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "CHANGELOG.md 中未找到 ## [$version] 段落" >&2
+            exit 1
+          fi
+          head -5 /tmp/release-notes.md
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="${TAG#v}"
+          title="fnmedia-ext ${ver}（原生版，x86 + arm 各一个包，内置运行时）"
+          assets=(dist/fnmedia-ext-*.fpk dist/fnmedia-ext-*.fpk.sha256)
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --draft=false --title "$title" --notes-file /tmp/release-notes.md --prerelease=false --latest
+            gh release upload "${TAG}" "${assets[@]}" --clobber
+          else
+            gh release create "${TAG}" --title "$title" --notes-file /tmp/release-notes.md --latest "${assets[@]}"
+          fi

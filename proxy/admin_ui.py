@@ -777,7 +777,7 @@ $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset
 /* ---------- 版本更新 ---------- */
 let UPD_TIMER=null;
 function $u(id){return document.getElementById(id);}
-function updEdLabel(ed){return ed==="full"?"全功能版":"轻量版";}
+function updEdLabel(ed){return "原生版";}
 async function loadUpdate(force){
   const rf=$u("updRefresh"),body=$u("updBody");
   if(force){
@@ -825,7 +825,7 @@ function renderUpdate(r){
     actions.style.display="flex";btn.style.display="none";prog.style.display="none";return;
   }
   if(u && u.update_available){
-    const edTip=u.edition==="full"?"（全功能版）":"（轻量版）";
+    const edTip="（原生版）";
     const size=u.asset_size?` · ${(u.asset_size/1048576).toFixed(1)}MB`:"";
     body.innerHTML='<div><span style="color:var(--ok,#16a34a);font-weight:600">发现新版本 v'+esc(u.version)+edTip+'</span>'+size+'</div>'
       +'<div class="muted sm" style="white-space:pre-wrap;margin-top:6px;max-height:180px;overflow:auto">'+esc((u.notes||"").slice(0,1200))+'</div>';

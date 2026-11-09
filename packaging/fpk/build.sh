@@ -1,150 +1,132 @@
 #!/usr/bin/env bash
-# fnmedia-ext FPK 打包：组装骨架 + 项目主体 → fnpack build → dist/*.fpk
-# 用法：packaging/fpk/build.sh [--public] [--stage-only DIR] [--fnpack /path] [--out dist]
-#   --public  公开包：只含通用公开能力（在全功能源码树上会先执行构建期裁剪）
+# fnmedia-ext FPK 打包（native-only：每个架构各出一个 fpk，内置运行时）
+# 组装骨架 + 项目主体 + 内置 Python/依赖/ffprobe（见 fetch_runtime.py）→ fnpack build
+# → dist/fnmedia-ext-<版本>-<x86|arm>.fpk（含 .sha256）。
+# NAS 上安装时不联网、不调用 apt/pip、不改动系统。
+#
+# 用法:
+#   packaging/fpk/build.sh                     # x86 + arm 都打（fnpack 缺失时自动下载）
+#   packaging/fpk/build.sh --arch x86|arm|all  # 指定架构
+#   packaging/fpk/build.sh --stage-only DIR    # 只组装不打包（结构测试用，默认 x86 且不拉运行时）
+#   packaging/fpk/build.sh --no-runtime        # 不下载内置运行时（仅结构测试）
+#   packaging/fpk/build.sh --fnpack /path/fnpack --out dist
+# 环境变量: FNPACK_VERSION（默认 1.2.3）、FNMEDIA_BUILD_CACHE（运行时下载缓存目录）
 set -euo pipefail
 
 FPK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${FPK_DIR}/../.." && pwd)"
-VERSION="$(head -n1 "${REPO_ROOT}/VERSION" | tr -d '[:space:]')"
-[ -n "${VERSION}" ] || { echo "ERROR: 无法读取 VERSION" >&2; exit 1; }
+VERSION="$(python3 "${REPO_ROOT}/scripts/release_version.py" --format version)" \
+  || { echo "ERROR: VERSION / RELEASE_CHANNEL 不合法" >&2; exit 1; }
 
-FNPACK_BIN="${FNPACK:-}"; STAGE=""; STAGE_ONLY=0; OUT_DIR="${REPO_ROOT}/dist"; PUBLIC=0
+FNPACK_BIN="${FNPACK:-}"; STAGE=""; STAGE_ONLY=0; ARCH_ARG=""; NO_RUNTIME=0
+OUT_DIR="${REPO_ROOT}/dist"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --stage-only) STAGE_ONLY=1; STAGE="$2"; shift 2 ;;
-    --fnpack) FNPACK_BIN="$2"; shift 2 ;;
-    --out) OUT_DIR="$2"; shift 2 ;;
-    --public) PUBLIC=1; shift ;;
+    --stage-only) [ $# -ge 2 ] || { echo "用法: $0 --stage-only <dir>" >&2; exit 1; }
+                  STAGE_ONLY=1; STAGE="$2"; shift 2 ;;
+    --arch)       [ $# -ge 2 ] || { echo "用法: $0 --arch x86|arm|all" >&2; exit 1; }
+                  ARCH_ARG="$2"; shift 2 ;;
+    --no-runtime) NO_RUNTIME=1; shift ;;
+    --fnpack)     [ $# -ge 2 ] || { echo "用法: $0 --fnpack <path>" >&2; exit 1; }
+                  FNPACK_BIN="$2"; shift 2 ;;
+    --out)        [ $# -ge 2 ] || { echo "用法: $0 --out <dir>" >&2; exit 1; }
+                  OUT_DIR="$2"; shift 2 ;;
+    -h|--help)    sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
-[ -n "${STAGE}" ] || STAGE="${FPK_DIR}/.build/fpk"
+
+# 架构：--stage-only 只组装一个架构（默认 x86），且默认不下载内置运行时。
+if [ "${STAGE_ONLY}" -eq 1 ]; then
+  ARCHES="${ARCH_ARG:-x86}"
+  [ "${FNMEDIA_STAGE_RUNTIME:-0}" = "1" ] || NO_RUNTIME=1
+else
+  ARCHES="${ARCH_ARG:-all}"
+fi
+[ "${ARCHES}" = "all" ] && ARCHES="x86 arm"
+for _a in ${ARCHES}; do
+  case "${_a}" in x86|arm) ;; *) echo "ERROR: --arch 只能是 x86、arm 或 all（收到: ${_a}）" >&2; exit 1 ;; esac
+done
+if [ "${STAGE_ONLY}" -eq 1 ] && [ "$(echo ${ARCHES} | wc -w)" -ne 1 ]; then
+  echo "ERROR: --stage-only 只能组装单个架构" >&2; exit 1
+fi
 command -v rsync >/dev/null 2>&1 || { echo "ERROR: 需要 rsync" >&2; exit 1; }
 
-rm -rf "${STAGE}"
-mkdir -p "${STAGE}/app/repo" "${STAGE}/app/ui"
+RUNTIME_CACHE="${FNMEDIA_BUILD_CACHE:-${FPK_DIR}/.build/runtime-cache}"
+mkdir -p "${RUNTIME_CACHE}"
 
-rsync -a --delete \
-  --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
-  --exclude='.git/' --exclude='dist/' --exclude='logs/' \
-  --exclude='state/' --exclude='packaging/fpk/.build/' \
-  --exclude='.release/' --exclude='.agents/' --exclude='*.fpk' \
-  --exclude='.DS_Store' \
-  --exclude='/proxy/assets/guard/guard.jar' \
-  --exclude='/proxy/assets/guard/sites.json' \
-  --exclude='/proxy/assets/guard/imported.json' \
-  --exclude='/proxy/assets/spiders/jars/' \
-  --exclude='/proxy/assets/spiders/jars.json' \
-  --exclude='/proxy/assets/spiders/spider_sites.json' \
-  --exclude='/proxy/assets/spiders/vendor/' \
-  --exclude='/FORUM_POST.md' \
-  --exclude='/FORUM_POST_CHANGELOG.md' \
-  --exclude='/FORUM_RELEASE_*.md' \
-  --exclude='/RELEASING.md' \
-  --exclude='*.apk' \
-  "${REPO_ROOT}/" "${STAGE}/app/repo/"
+stage_arch() {
+  local ARCH="$1"
+  [ "${STAGE_ONLY}" -eq 1 ] || STAGE="${FPK_DIR}/.build/fpk-${ARCH}"
+  rm -rf "${STAGE}"
+  mkdir -p "${STAGE}/app/repo" "${STAGE}/app/ui"
 
+  # 仓库主体：不含开发文件、测试、离线 wheelhouse（依赖改由内置运行时提供）、本地秘密与私有运行态
+  rsync -a --delete \
+    --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
+    --exclude='.git/' --exclude='.git*' --exclude='.github/' --exclude='.agents/' \
+    --exclude='dist/' --exclude='logs/' --exclude='state/' --exclude='.tools/' \
+    --exclude='packaging/' --exclude='tests/' --exclude='wheelhouse/' --exclude='/runtime/' \
+    --exclude='.release/' --exclude='*.fpk' --exclude='*.apk' --exclude='.DS_Store' \
+    --exclude='/AGENTS.md' --exclude='/CLAUDE.md' \
+    --exclude='/proxy/assets/guard/' --exclude='/proxy/assets/spiders/' \
+    --exclude='/FORUM_POST*.md' --exclude='/FORUM_RELEASE_*.md' --exclude='/RELEASING.md' \
+    "${REPO_ROOT}/" "${STAGE}/app/repo/"
+  rm -f "${STAGE}/app/repo/proxy/"*local.json
 
-# 分发版不携带维护者私用的加固源目录/加固 jar/小雅凭证：由用户在管理页自行添加。
-# 保留空目录占位，避免首启写文件时缺目录。
-mkdir -p "${STAGE}/app/repo/proxy/assets/guard"
-: > "${STAGE}/app/repo/proxy/assets/guard/.gitkeep"
-# 用户从自己订阅下载的普通 csp spider jar 缓存与来源清单属于个人添加源，
-# 不分发；运行时缺目录会自动重建并按需下载。
-mkdir -p "${STAGE}/app/repo/proxy/assets/spiders/jars"
-: > "${STAGE}/app/repo/proxy/assets/spiders/jars/.gitkeep"
+  # 内置运行时（Python/依赖/ffprobe）：安装时无需联网、不调用 apt/pip
+  if [ "${NO_RUNTIME}" -eq 1 ]; then
+    echo "[WARN] 跳过内置运行时（--no-runtime）：该包只用于结构检查，不能安装使用"
+  else
+    python3 "${FPK_DIR}/fetch_runtime.py" --arch "${ARCH}" --cache "${RUNTIME_CACHE}" \
+      --out "${STAGE}/app/repo/runtime"
+  fi
 
-# 全功能版内置第三方爬虫 jar（如饭太硬订阅的 Yoursmile.jar）：源文件放在仓库
-# proxy/assets/spiders/vendor/（不进分发包，避免与播种产物重复占空间）。打包阶段
-# 直接播种进 jars/<jarid>.jar 并生成 jars.json，使「一键饭太硬」离线、首装/升级
-# 首次导入即启用，无需联网下载。公开包在随后的 public_strip 阶段会整体移除
-# assets/spiders，故此处不灌内置 jar。
-SP_SRC="${REPO_ROOT}/proxy/assets/spiders/vendor"
-SP_DST="${STAGE}/app/repo/proxy/assets/spiders"
-if [ "${PUBLIC}" -eq 0 ] && [ -f "${SP_SRC}/bundled.json" ]; then
-  "${PYTHON:-python3}" - "${SP_SRC}" "${SP_DST}" <<'PYSEED'
-import hashlib, json, os, shutil, sys
-src_root, dst_root = sys.argv[1], sys.argv[2]
-jardir = os.path.join(dst_root, "jars")
-os.makedirs(jardir, exist_ok=True)
-try:
-    manifest = json.load(open(os.path.join(src_root, "bundled.json"), encoding="utf-8"))
-except Exception:
-    manifest = {"jars": []}
-out = {}
-for e in manifest.get("jars", []):
-    url = str(e.get("url") or "").strip()
-    fname = str(e.get("file") or "").strip()
-    if not url or not fname:
-        continue
-    src = os.path.join(src_root, fname)
-    if not os.path.isfile(src) or os.path.getsize(src) <= 0:
-        continue
-    jid = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
-    dst = os.path.join(jardir, jid + ".jar")
-    shutil.copyfile(src, dst)
-    os.chmod(dst, 0o644)
-    out[jid] = {"url": url, "file": jid + ".jar",
-                "size": os.path.getsize(dst), "ok": True, "bundled": True}
-json.dump(out, open(os.path.join(dst_root, "jars.json"), "w", encoding="utf-8"),
-          ensure_ascii=False, indent=1)
-print("[fpk] 内置 spider jar 播种:", len(out), "个 ->", sorted(out))
-PYSEED
+  # manifest 版本、包内 VERSION、文件名一致保留数字 -N（飞牛对同版本号不会覆盖安装）
+  sed -e "s/@VERSION@/${VERSION}/" -e "s/@PLATFORM@/${ARCH}/" "${FPK_DIR}/manifest.in" > "${STAGE}/manifest"
+  cp "${FPK_DIR}/ICON.PNG" "${FPK_DIR}/ICON_256.PNG" "${STAGE}/"
+  cp -a "${FPK_DIR}/app/ui/." "${STAGE}/app/ui/"
+  cp -a "${FPK_DIR}/cmd" "${STAGE}/cmd"
+  cp -a "${FPK_DIR}/config" "${STAGE}/config"
+  [ -d "${FPK_DIR}/wizard" ] && cp -a "${FPK_DIR}/wizard" "${STAGE}/wizard"
+  chmod +x "${STAGE}"/cmd/*
+
+  # 内置运行时可执行文件显式 0755，目录对 group/other 可读（不依赖构建机 umask）
+  if [ -d "${STAGE}/app/repo/runtime" ]; then
+    find "${STAGE}/app/repo/runtime/python/bin" "${STAGE}/app/repo/runtime/ffmpeg" \
+      "${STAGE}/app/repo/runtime/scripts" -maxdepth 1 -type f -exec chmod 0755 {} +
+    chmod -R u+rwX,go+rX "${STAGE}/app/repo/runtime"
+  fi
+  echo "[fpk] 组装完成: ${STAGE} (version=${VERSION}, arch=${ARCH})"
+}
+
+if [ "${STAGE_ONLY}" -eq 1 ]; then
+  for ARCH in ${ARCHES}; do stage_arch "${ARCH}"; done
+  exit 0
 fi
-# 维护者个人本地配置（含网盘账号）不进任何分发包。
-LOCAL_CFG="local.json"
-rm -f "${STAGE}/app/repo/proxy/"*"${LOCAL_CFG}"
-
-# 清洗【分发包内】CHANGELOG：去除维护者私源名、内置 jar 路径、限制级能力描述。
-# 仅改暂存副本，源码 CHANGELOG.md 保留完整开发记录。
-if [ -f "${STAGE}/app/repo/tools/sanitize_changelog.py" ]; then
-  "${PYTHON:-python3}" "${STAGE}/app/repo/tools/sanitize_changelog.py" \
-    "${STAGE}/app/repo/CHANGELOG.md"
-fi
-
-# 公开构建：从暂存副本移除可选特性（非标准源适配 / 扩展分类）。
-# 全功能源码树里有构建剥离器时执行剥离；若工作树本身已是公开树
-# （剥离器已不存在），则内容本就干净，直接跳过。
-if [ "${PUBLIC}" -eq 1 ] && [ -f "${STAGE}/app/repo/tools/public_strip.py" ]; then
-  PY3="${PYTHON:-python3}"
-  "${PY3}" "${STAGE}/app/repo/tools/public_strip.py" "${STAGE}/app/repo"
-  # 构建工具不进包；剥空的 assets 目录也清掉
-  rm -rf "${STAGE}/app/repo/tools"
-  rmdir "${STAGE}/app/repo/proxy/assets" 2>/dev/null || true
-fi
-
-MANIFEST_VER="$(echo "${VERSION}" | sed -E 's/([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
-sed "s/@VERSION@/${MANIFEST_VER}/" "${FPK_DIR}/manifest.in" > "${STAGE}/manifest"
-cp "${FPK_DIR}/ICON.PNG" "${FPK_DIR}/ICON_256.PNG" "${STAGE}/" 2>/dev/null || true
-cp -a "${FPK_DIR}/app/ui/." "${STAGE}/app/ui/"
-cp -a "${FPK_DIR}/cmd" "${STAGE}/cmd"
-cp -a "${FPK_DIR}/config" "${STAGE}/config"
-# 安装向导（安装时展示免责声明，需用户同意）
-if [ -d "${FPK_DIR}/wizard" ]; then
-  mkdir -p "${STAGE}/wizard"
-  cp -a "${FPK_DIR}/wizard/." "${STAGE}/wizard/"
-fi
-chmod +x "${STAGE}"/cmd/*
-
-echo "[fpk] 组装完成: ${STAGE} (version=${VERSION})"
-[ "${STAGE_ONLY}" -eq 1 ] && exit 0
 
 if [ -z "${FNPACK_BIN}" ]; then
   if command -v fnpack >/dev/null 2>&1; then FNPACK_BIN="$(command -v fnpack)"; else
     case "$(uname -m)" in x86_64) A=amd64;; aarch64|arm64) A=arm64;; *) echo "不支持的架构" >&2; exit 1;; esac
     FNPACK_BIN="${REPO_ROOT}/.tools/fnpack"; mkdir -p "$(dirname "${FNPACK_BIN}")"
-    [ -x "${FNPACK_BIN}" ] || curl -fsSL -o "${FNPACK_BIN}" "https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-${A}"
+    if [ ! -x "${FNPACK_BIN}" ]; then
+      curl -fsSL -o "${FNPACK_BIN}" "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION:-1.2.3}-linux-${A}"
+    fi
     chmod +x "${FNPACK_BIN}"
   fi
 fi
-WORK="$(mktemp -d)"; trap 'rm -rf "${WORK}"' EXIT
-( cd "${WORK}" && "${FNPACK_BIN}" build --directory "${STAGE}" )
-BUILT="$(find "${WORK}" "${STAGE}" -maxdepth 2 -name '*.fpk' -print -quit 2>/dev/null || true)"
-[ -n "${BUILT}" ] || { echo "ERROR: fnpack 未产出 .fpk" >&2; exit 1; }
+
 mkdir -p "${OUT_DIR}"
-SUFFIX=""; [ "${PUBLIC}" -eq 1 ] && SUFFIX="-public"
-FINAL="${OUT_DIR}/fnmedia-ext-${VERSION}${SUFFIX}.fpk"
-mv "${BUILT}" "${FINAL}"
-( cd "$(dirname "${FINAL}")" && sha256sum "$(basename "${FINAL}")" > "$(basename "${FINAL}").sha256" )
-echo "[fpk] 打包完成: ${FINAL}"
+for ARCH in ${ARCHES}; do
+  stage_arch "${ARCH}"
+  WORK="$(mktemp -d)"
+  if ! ( cd "${WORK}" && "${FNPACK_BIN}" build --directory "${STAGE}" ); then
+    rm -rf "${WORK}"; echo "ERROR: fnpack build 失败 (${ARCH})" >&2; exit 1
+  fi
+  BUILT="$(find "${WORK}" "${STAGE}" -maxdepth 2 -name '*.fpk' -print -quit 2>/dev/null || true)"
+  [ -n "${BUILT}" ] || { rm -rf "${WORK}"; echo "ERROR: fnpack 未产出 .fpk (${ARCH})" >&2; exit 1; }
+  FINAL="${OUT_DIR}/fnmedia-ext-${VERSION}-${ARCH}.fpk"
+  mv "${BUILT}" "${FINAL}"; rm -rf "${WORK}"
+  ( cd "$(dirname "${FINAL}")" && sha256sum "$(basename "${FINAL}")" > "$(basename "${FINAL}").sha256" )
+  echo "[fpk] 打包完成: ${FINAL} ($(( $(stat -c %s "${FINAL}") / 1048576 )) MB)"
+done

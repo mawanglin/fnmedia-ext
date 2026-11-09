@@ -13,6 +13,8 @@ TimeoutStopSec=25
 Restart=no
 UMask=0022
 Environment=PYTHONUNBUFFERED=1
+# 内置 ffprobe（runtime/ffmpeg）优先；源码安装时该目录不存在，等同于系统 PATH
+Environment=PATH=@ROOT@/runtime/ffmpeg:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=FNMEDIA_UPSTREAM_SOCK=/var/run/trim_media_upstream.sock
 
 [Install]

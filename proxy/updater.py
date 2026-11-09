@@ -2,7 +2,7 @@
 
 设计要点（安全/可逆优先）：
 - 只读 GitHub 官方 API（releases/latest 与 releases/tags），不接受第三方地址；
-- 资产仅在本仓库自己的 Release 附件中按文件名规则挑选（轻量版/全功能版）；
+- 资产仅在本仓库自己的 Release 附件中按文件名规则挑选（按 CPU 架构：fnmedia-ext-<版本>-<x86|arm>.fpk）；
 - 下载后强制 sha256 校验（Release 必须带同名 .sha256 附件），不符则拒绝安装；
 - 安装走 systemd-run 瞬态系统单元做自包含热替换（独立于本服务 cgroup，
   停 fnmedia-ext 不会杀掉它）：停服→备份 state→解包 rsync 覆盖代码（保留 .venv）
@@ -35,7 +35,9 @@ try:
 except Exception:  # pragma: no cover
     features = None
 
-REPO_SLUG = "yujian0815/fnmedia-ext"
+# native-only fork：只检查本 fork 的 Release（上游 yujian0815 发布的是依赖系统 Python/pip 的包，
+# 不能直接升级到本分支）。
+REPO_SLUG = "mawanglin/fnmedia-ext"
 API_BASE = f"https://api.github.com/repos/{REPO_SLUG}/releases"
 # 检查结果缓存时长（秒）：避免频繁打 GitHub，也让管理页打开即时。
 CHECK_TTL = 30 * 60
@@ -108,8 +110,11 @@ def current_version() -> str:
 
 
 def _vtuple(v: str) -> tuple:
-    nums = re.findall(r"\d+", str(v or ""))
-    return tuple(int(x) for x in (nums + [0, 0, 0])[:3])
+    """x.y.z 加自有小版本：'1.0.0-1'（VERSION）与 'v1.0.0-n1'（tag）都解析为 (1, 0, 0, 1)。"""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)(?:-n?(\d+))?", str(v or ""))
+    if not m:
+        return (0, 0, 0, 0)
+    return tuple(int(x or 0) for x in m.groups())
 
 
 def is_newer(latest: str, current: str | None = None) -> bool:
@@ -117,36 +122,26 @@ def is_newer(latest: str, current: str | None = None) -> bool:
 
 
 def edition_full() -> bool:
-    """当前运行副本是否为全功能版（决定默认推荐下载哪个 fpk）。"""
-    try:
-        return bool(getattr(features, "DDUO", False) or getattr(features, "GUARD", False))
-    except Exception:
-        return False
+    """native-only 包不区分轻量/全功能版；保留函数仅为兼容调用方。"""
+    return False
+
+
+def arch_tag() -> str:
+    """当前 CPU 架构对应的安装包后缀：x86 或 arm。"""
+    import platform
+    return "arm" if platform.machine().lower() in ("aarch64", "arm64", "armv8l") else "x86"
 
 
 # --------------------------------------------------------------- GitHub
 
-def _pick_asset(assets: list[dict], full: bool) -> dict | None:
-    """在 Release 附件里挑目标安装包。
-
-    全功能版：fnmedia-ext-<ver>-full.fpk
-    轻量版：fnmedia-ext-<ver>.fpk（排除 -full / -lite / -public），
-            找不到则退回 -lite.fpk。
-    """
-    lite_plain = lite_alt = full_pkg = None
+def _pick_asset(assets: list[dict], full: bool = False, arch: str | None = None) -> dict | None:
+    """在 Release 附件里挑当前架构的安装包：fnmedia-ext-<版本>-<x86|arm>.fpk。"""
+    want = f"-{arch or arch_tag()}.fpk"
     for a in assets:
         name = a.get("name") or ""
-        if not name.endswith(".fpk"):
-            continue
-        if re.search(r"-full\.fpk$", name):
-            full_pkg = a
-        elif re.search(r"-(lite|public)\.fpk$", name):
-            lite_alt = a
-        elif re.match(r"^fnmedia-ext-.+\.fpk$", name):
-            lite_plain = a
-    if full:
-        return full_pkg
-    return lite_plain or lite_alt
+        if re.match(r"^fnmedia-ext-.+\.fpk$", name) and name.endswith(want):
+            return a
+    return None
 
 
 def _fetch_release_sync() -> dict | None:
@@ -177,7 +172,7 @@ def _normalize(release: dict, full: bool) -> dict:
         "notes": (release.get("body") or "").strip(),
         "published_at": release.get("published_at") or "",
         "html_url": release.get("html_url") or "",
-        "edition": "full" if full else "lite",
+        "edition": "native",
         "asset": (pkg.get("browser_download_url") if pkg else ""),
         "asset_name": (pkg.get("name") if pkg else ""),
         "asset_size": (pkg.get("size") if pkg else 0),
@@ -230,7 +225,7 @@ def _snapshot() -> dict:
     return {
         "code": 0,
         "current_version": current_version(),
-        "edition": "full" if edition_full() else "lite",
+        "edition": "native",
         "status": _STATE["status"],
         "progress": _STATE["progress"],
         "last_check": _STATE["last_check"],
@@ -421,6 +416,8 @@ RSYNC_EX=(
   --exclude='proxy/assets/spiders/' --exclude='proxy/assets/catvod/'
   --exclude='proxy/assets/drpy/' --exclude='*local.json'
 )
+# 内置运行时整体替换（不能叠加：旧版本的依赖文件会残留）；.venv 由 install.sh 按新运行时重建
+if [ -d "$EXTRACT/repo/runtime" ]; then rm -rf "$ROOT/runtime"; fi
 if command -v rsync >/dev/null 2>&1; then
   rsync -a "${{RSYNC_EX[@]}}" "$EXTRACT/repo/" "$ROOT/" || fail "rsync 覆盖代码失败"
 else

@@ -8,6 +8,14 @@ PY="$ROOT/.venv/bin/python"
 SRC_IN="$ROOT/deploy/fnmedia-ext.service.in"
 DST="/etc/systemd/system/fnmedia-ext.service"
 
+# 内置运行时（native-only fpk）：用包内 Python 离线建/修 .venv（幂等）。
+# 自更新热替换也经过这里，保证 runtime 换新后 .venv 同步指向新依赖。
+# shellcheck source=runtime_common.sh
+. "$ROOT/deploy/runtime_common.sh"
+if fnmedia_bundled; then
+  bundled_make_venv "$ROOT/.venv" || { echo "ERROR: 内置运行时初始化失败" >&2; exit 1; }
+fi
+
 if [ ! -x "$PY" ]; then
   echo "ERROR: 未找到虚拟环境 $PY；请先：python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
   exit 1

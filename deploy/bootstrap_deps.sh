@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # fnmedia-ext 运行时依赖引导（被 install_callback / upgrade_callback 复用）。
 #
-# 目标：在“干净、可能无法直连 PyPI”的飞牛 NAS 上高成功率地准备 .venv。
+# 内置运行时（native-only fpk，runtime/BUNDLED 存在）：只用包内 Python 与依赖离线建 .venv，
+# 绝不调用系统 python3 / apt / pip，也不联网；失败即报错，不回退到下面的源码安装流程。
+#
+# 源码安装（无 runtime/BUNDLED）——目标：在“干净、可能无法直连 PyPI”的飞牛 NAS 上高成功率地准备 .venv。
 #   1) 创建独立 venv（系统 python3-venv 缺失时尝试 virtualenv / 自带 ensurepip 兜底）；
 #   2) 优先用随包内置的【离线 wheelhouse】安装（含 x86_64/aarch64 原生 wheel，
 #      无需联网、无需编译）；
@@ -22,6 +25,20 @@ cd "$ROOT" || { echo "无法进入应用目录" >&2; exit 1; }
 VENV="$ROOT/.venv"
 PYBIN="$VENV/bin/python"
 PIP="$VENV/bin/pip"
+
+# shellcheck source=runtime_common.sh
+. "$ROOT/deploy/runtime_common.sh"
+if fnmedia_bundled; then
+  log "内置运行时模式：用包内 Python 离线创建 .venv"
+  bundled_make_venv "$VENV" >> "$LOG" 2>&1 \
+    || { echo "内置运行时初始化失败，详见 $LOG" >&2; exit 2; }
+  if ! "$PYBIN" -c 'import fastapi, uvicorn, httpx, starlette, pydantic' >> "$LOG" 2>&1; then
+    echo "内置依赖自检 import 失败（包与当前架构不匹配？），详见 $LOG" >&2
+    exit 4
+  fi
+  log "依赖就绪（内置运行时）"
+  exit 0
+fi
 
 # 核心服务启动【强依赖】。wasmtime 等可选重依赖不在此列（dduo WASM 源惰性导入，
 # 缺失时相关功能优雅降级，绝不拖垮主服务）。
