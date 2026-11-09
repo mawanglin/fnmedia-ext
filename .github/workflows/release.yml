@@ -60,7 +60,7 @@ jobs:
 
       - name: Build fpk packages (x86 + arm)
         run: |
-          ./packaging/fpk/build.sh
+          bash packaging/fpk/build.sh
           ls -la dist/
 
       - name: Verify the fpks are self-contained
