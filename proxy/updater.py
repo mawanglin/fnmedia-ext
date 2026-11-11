@@ -110,11 +110,14 @@ def current_version() -> str:
 
 
 def _vtuple(v: str) -> tuple:
-    """x.y.z 加自有小版本：'1.0.0-1'（VERSION）与 'v1.0.0-n1'（tag）都解析为 (1, 0, 0, 1)。"""
-    m = re.search(r"(\d+)\.(\d+)\.(\d+)(?:-n?(\d+))?", str(v or ""))
+    """x.y.z 加自有小版本：'1.0.0-1'（VERSION）与 'v1.0.0-n1'（tag）都解析为 (1, 0, 0, 1)；
+    上游预发布段（如 '1.0.1-beta.1-1' / 'v1.0.1-beta.1-n1'）忽略，只取末尾的自有小版本。"""
+    s = str(v or "")
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", s)
     if not m:
         return (0, 0, 0, 0)
-    return tuple(int(x or 0) for x in m.groups())
+    r = re.search(r"-n?(\d+)$", s)
+    return tuple(int(x) for x in m.groups()) + (int(r.group(1)) if r else 0,)
 
 
 def is_newer(latest: str, current: str | None = None) -> bool:

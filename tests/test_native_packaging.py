@@ -20,7 +20,7 @@ class ReleaseVersionTest(unittest.TestCase):
             release_version.read_first_line(ROOT / "VERSION"),
             release_version.read_first_line(ROOT / "RELEASE_CHANNEL"))
         self.assertEqual(info["tag"], "v" + info["display_version"])
-        self.assertRegex(info["display_version"], r"^\d+\.\d+\.\d+-n[1-9]\d*$")
+        self.assertRegex(info["display_version"], r"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?-n[1-9]\d*$")
 
     def test_rejects_bad_versions(self):
         for bad in ("1.0.0", "1.0.0-0", "1.0.0a", "1.0-1"):
@@ -31,6 +31,9 @@ class ReleaseVersionTest(unittest.TestCase):
 
     def test_display_version(self):
         self.assertEqual(release_version.release_info("1.0.0-3", "fork")["tag"], "v1.0.0-n3")
+        self.assertEqual(release_version.release_info("1.0.1-beta.1-1", "fork")["tag"], "v1.0.1-beta.1-n1")
+        self.assertTrue(updater.is_newer("v1.0.1-beta.1-n2", "1.0.1-beta.1-1"))
+        self.assertTrue(updater.is_newer("v1.0.1-beta.1-n1", "1.0.0-1"))
 
     def test_changelog_has_current_section(self):
         display = release_version.release_info(
